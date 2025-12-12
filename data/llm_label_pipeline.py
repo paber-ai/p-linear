@@ -28,8 +28,12 @@ running the script.
 """
 
 from __future__ import annotations
-from typing import List
+from typing import List, Iterable
 from pydantic import BaseModel
+import json
+import ast
+import pandas as pd
+from pathlib import Path
 
 
 SYSTEM_PROMPT = """
@@ -194,3 +198,185 @@ def _prompt_for_missing(prompt: str, current: str | None = None) -> str:
         raise SystemExit("Aborted: required input was empty.")
 
     return value
+
+
+def load_table(path_str: str, columns: Iterable[str]) -> pd.DataFrame:
+    """Load a tabular dataset with pandas based on file extension.
+
+    The path may point to a local file or a remote URI supported by pandas/
+    fsspec (e.g. hf://datasets/... for Hugging Face Hub datasets).
+    """
+
+    suffix = Path(path_str).suffix.lower()
+    usecols = list(columns) if columns else None
+
+    if suffix in {".csv", ".tsv"}:
+        sep = "," if suffix == ".csv" else "\t"
+
+        return pd.read_csv(path_str, usecols=usecols, sep=sep)
+
+    if suffix in {".json", ".jsonl"}:
+        # Assume JSON lines for .jsonl, normal JSON array for .json.
+        lines = suffix == ".jsonl"
+
+        return pd.read_json(path_str, lines=lines)
+
+    if suffix in {".parquet"}:
+        return pd.read_parquet(path_str, columns=usecols)
+
+    raise SystemExit(
+        f"Unsupported file extension '{suffix}'. Use CSV, TSV, JSON, JSONL, or Parquet."
+    )
+
+
+def build_text(row: pd.Series, columns: List[str]) -> str:
+    """Extract the primary user query text from the first column.
+
+    All additional columns are treated as auxiliary context and are not
+    concatenated into the training `text`; they are instead passed to the LLM
+    as structured context and stored under metadata.
+    """
+
+    if not columns:
+        return ""
+
+    first = columns[0]
+    value = row.get(first, "")
+
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+
+    except Exception:
+        pass
+
+    def _maybe_parse_json_like(raw: object) -> object | None:
+        if isinstance(raw, (list, dict)):
+            return raw
+
+        if not isinstance(raw, str):
+            return None
+
+        stripped = raw.strip()
+
+        if not stripped:
+            return None
+
+        if stripped[0] not in "[{":
+            return None
+
+        try:
+            return json.loads(stripped)
+
+        except json.JSONDecodeError:
+            pass
+
+        try:
+            return ast.literal_eval(stripped)
+
+        except (ValueError, SyntaxError):
+            return None
+
+    def _extract_text_from_conversation_payload(payload: object) -> str | None:
+        messages: object = payload
+
+        if isinstance(payload, dict):
+            for key in ("messages", "conversation", "conversations"):
+                if key in payload:
+                    messages = payload.get(key)
+
+                    break
+            else:
+                messages = [payload]
+
+        if not isinstance(messages, list):
+            return None
+
+        candidates: list[tuple[str, str]] = []
+
+        for item in messages:
+            if isinstance(item, dict):
+                role = (
+                    item.get("role")
+                    or item.get("speaker")
+                    or item.get("from")
+                    or item.get("type")
+                )
+
+                text_val = item.get("content")
+
+                if text_val is None:
+                    text_val = item.get("text")
+
+                if text_val is None:
+                    text_val = item.get("value")
+
+                if isinstance(text_val, list):
+                    parts: list[str] = []
+
+                    for part in text_val:
+                        if isinstance(part, dict):
+                            part_text = part.get("text") or part.get("content")
+
+                            if isinstance(part_text, str):
+                                parts.append(part_text)
+
+                        elif isinstance(part, str):
+                            parts.append(part)
+
+                    if parts:
+                        text_val = "".join(parts)
+
+                if isinstance(text_val, dict):
+                    part_text = (
+                        text_val.get("text")
+                        if isinstance(text_val.get("text"), str)
+                        else None
+                    )
+
+                    if part_text is not None:
+                        text_val = part_text
+
+                if not isinstance(text_val, str):
+                    continue
+
+                role_str = str(role).lower().strip() if role is not None else ""
+                candidates.append((role_str, text_val))
+
+            elif isinstance(item, str):
+                candidates.append(("", item))
+
+        if not candidates:
+            return None
+
+        user_like = [
+            text
+            for role, text in candidates
+            if role in {"user", "human", "customer"} or role.startswith("user")
+        ]
+
+        if user_like:
+            for text in reversed(user_like):
+                if text.strip():
+                    return text.strip()
+
+            return user_like[-1].strip()
+
+        for _, text in candidates:
+            if text.strip():
+                return text.strip()
+
+        return candidates[0][1].strip()
+
+    parsed = _maybe_parse_json_like(value)
+
+    if parsed is not None:
+        extracted = _extract_text_from_conversation_payload(parsed)
+
+        if extracted:
+            return extracted
+
+    return str(value)
