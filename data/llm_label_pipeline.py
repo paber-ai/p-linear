@@ -29,6 +29,7 @@ running the script.
 
 from __future__ import annotations
 from typing import List
+from pydantic import BaseModel
 
 
 SYSTEM_PROMPT = """
@@ -129,6 +130,14 @@ SYSTEM_PROMPT = """
 """
 
 
+COLOR_RESET = "\033[0m"
+COLOR_BOLD = "\033[1m"
+COLOR_GREEN = "\033[92m"
+COLOR_YELLOW = "\033[93m"
+COLOR_RED = "\033[91m"
+COLOR_CYAN = "\033[96m"
+
+
 P_LINEAR_HEADS: List[str] = [
     "simple",
     "complex",
@@ -137,3 +146,51 @@ P_LINEAR_HEADS: List[str] = [
     "high_risk",
     "code_like",
 ]
+
+
+class PLinearScores(BaseModel):
+    """Confidence scores for each p-linear head (0.0-1.0)."""
+
+    simple: float
+    complex: float
+    needs_tools: float
+    needs_memory: float
+    high_risk: float
+    code_like: float
+
+
+class PLinearMetadata(BaseModel):
+    """Auxiliary metadata predicted alongside labels.
+
+    - language: short language code or description (e.g., "en", "ar").
+    - context: optional free-form notes about why the labels were chosen.
+    - scores: per-head confidence scores.
+    """
+
+    language: str | None = None
+    context: str | None = None
+    scores: PLinearScores | None = None
+
+
+class PLinearOutput(BaseModel):
+    """Structured output model for p-linear heads and metadata."""
+
+    simple: int
+    complex: int
+    needs_tools: int
+    needs_memory: int
+    high_risk: int
+    code_like: int
+    metadata: PLinearMetadata | None = None
+
+
+def _prompt_for_missing(prompt: str, current: str | None = None) -> str:
+    if current:
+        return current
+
+    value = input(prompt).strip()
+
+    if not value:
+        raise SystemExit("Aborted: required input was empty.")
+
+    return value
