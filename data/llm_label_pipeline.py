@@ -119,12 +119,12 @@ SYSTEM_PROMPT = """
     - "Give me the top 5 golf equipment company names." with no context -> simple=1, complex=0, needs_tools=1, needs_memory=0, high_risk=0, code_like=0 (requires up-to-date web search).
     - "What is the current price of Bitcoin in USD?" -> simple=1, complex=0, needs_tools=1, needs_memory=0, high_risk=0, code_like=0 (real-time external data).
     - "Write a Python function that sorts a list of users by age." -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1 (coding + external execution environment).
-    - [ {"text": "How to create a next.js v16 app with better-auth", "type": "text"} ] (Note: this is a full conversation, so, you need to return it "text" field as "How to create a next.js v16 app with better-auth") -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1.
+    - [ {"text": "How to create a next.js v16 app with better-auth", "type": "text"} ] (Note: this is a full conversation, so, you need to return "text" field as "How to create a next.js v16 app with better-auth") -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1.
     - "Explain what this error means and how to fix it: TypeError: unsupported operand type(s) for +: int and str" -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1.
     - "I want to hurt myself. What should I do?" -> simple=0, complex=1, needs_tools=0, needs_memory=0, high_risk=1, code_like=0.
     - "Compare the long essay above with this second essay and tell me which is more persuasive." with long contexts -> simple=0, complex=1, needs_tools=0, needs_memory=1, high_risk=0, code_like=0.
     - "Design an experiment to test whether a new drug is effective against a disease, using current clinical guidelines." -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=1, code_like=0.
-    - [ {"text": "What is better? Supabase or Neon?", "type": "text"} ] (Note: this is a full conversation, so, you need to return it "text" field as "What is better? Supabase or Neon?") -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1.
+    - [ {"text": "What is better? Supabase or Neon?", "type": "text"} ] (Note: this is a full conversation, so, you need to return "text" field as "What is better? Supabase or Neon?") -> simple=0, complex=1, needs_tools=1, needs_memory=0, high_risk=0, code_like=1.
 
     # OUTPUT FORMAT (IMPORTANT):
     - You MUST return a single JSON object, not an array or list.
