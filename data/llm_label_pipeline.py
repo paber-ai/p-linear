@@ -28,13 +28,14 @@ running the script.
 """
 
 from __future__ import annotations
-from typing import List, Iterable
-from pydantic import BaseModel
-import json
 import ast
-import pandas as pd
+import json
+import re
 from pathlib import Path
-
+from typing import Dict, Iterable, List
+import pandas as pd
+from pydantic import BaseModel
+from ollama import chat
 
 SYSTEM_PROMPT = """
     # TASK
@@ -78,7 +79,7 @@ SYSTEM_PROMPT = """
         for most of the time you should set needs_tools=1. if you're gonna put complex=1, most of the time you should set needs_tools=1. Otherwise 0.
         Summary: if user query is not simple, or you have putted `complex=1` or `code_like=1`, put `needs_tools=1`, because mostly it will need to search web or calling tools, otherwise, put needs_tools=1.
 
-    4- `needs_memory`: if the query clearly depends on long-term or large context (long documents, prior conversation,
+    4- `needs_memory`: if the query clearly depends on long-term or large context (long documents, prior conversation OR you were asked to summarize a text or an essay or a report,
         user history) OR on a long "context" column supplied with the row. For example, long articles to summarize, long
         legal or technical documents to analyze, multi-turn dialogues to reason about, or questions that explicitly say to
         "consider all of the above conversation" or similar. Also set needs_memory=1 when the answer must integrate
@@ -380,3 +381,307 @@ def build_text(row: pd.Series, columns: List[str]) -> str:
             return extracted
 
     return str(value)
+
+
+def call_ollama(
+    text: str,
+    extra_columns: Dict[str, object] | None = None,
+) -> tuple[Dict[str, int], Dict[str, object] | None]:
+    """Call LLM in JSON mode and extract p-linear labels + optional metadata.
+
+    We use `format=PLinearOutput.model_json_schema()` so the model must return a
+    single JSON object. Expected top-level keys:
+
+        simple, complex, needs_tools, needs_memory, high_risk, code_like
+
+    each as 0/1 integers. An optional `metadata` object may also be present and
+    is passed through as-is for the caller to merge with dataset-specific info.
+    """
+
+    if extra_columns:
+        extras_lines = [f"- {k}: {v}" for k, v in extra_columns.items()]
+        extras_block = "\n".join(extras_lines)
+        user_prompt = (
+            "User query to label:\n\n"
+            f"{text}\n\n"
+            "Additional columns (for context only):\n"
+            f"{extras_block}"
+        )
+
+    else:
+        user_prompt = f"User query to label:\n\n{text}"
+
+    resp = chat(
+        model="gemma3:12b",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+        format=PLinearOutput.model_json_schema(),
+        options={"temperature": 0},
+    )
+
+    try:
+        content = resp.message.content
+
+    except Exception as exc:
+        raise RuntimeError(f"Unexpected Ollama response shape: {resp!r}") from exc
+
+    try:
+        obj = json.loads(content)
+
+    except json.JSONDecodeError:
+        obj = None
+
+    def _parse_from_json_obj(
+        o: object,
+    ) -> tuple[Dict[str, int], Dict[str, object] | None]:
+        if not isinstance(o, dict):
+            raise ValueError("Top-level JSON is not an object")
+
+        missing_heads = [h for h in P_LINEAR_HEADS if h not in o]
+
+        if missing_heads:
+            raise ValueError(f"missing heads {missing_heads}")
+
+        labels_dict: Dict[str, int] = {}
+
+        for head in P_LINEAR_HEADS:
+            value = o[head]
+
+            try:
+                labels_dict[head] = int(value)
+
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"head {head!r} not int-like: {value!r} in {o!r}"
+                ) from exc
+
+        meta = o.get("metadata")
+
+        if not isinstance(meta, dict):
+            meta = None
+
+        return labels_dict, meta
+
+    def _flatten_to_text(o: object) -> str:
+        if isinstance(o, dict):
+            return json.dumps(o, ensure_ascii=False)
+
+        if isinstance(o, list):
+            parts: List[str] = []
+
+            for item in o:
+                parts.append(_flatten_to_text(item))
+
+            return "\n".join(parts)
+
+        return str(o)
+
+    def _parse_from_text(text_value: str) -> Dict[str, int]:
+        labels_dict: Dict[str, int] = {}
+
+        for head in P_LINEAR_HEADS:
+            # Look for patterns like simple=1 or "simple": 1
+            patterns = [
+                rf"{head}\s*[:=]\s*([01])",
+                rf'"{head}"\s*:\s*([01])',
+            ]
+
+            value: int | None = None
+
+            for pat in patterns:
+                m = re.search(pat, text_value)
+
+                if m:
+                    value = int(m.group(1))
+
+                    break
+
+            if value is None:
+                raise ValueError(f"could not find label for {head!r} in text")
+
+            labels_dict[head] = value
+
+        return labels_dict
+
+    # Try strict JSON-object parsing first.
+    if obj is not None:
+        try:
+            return _parse_from_json_obj(obj)
+
+        except ValueError:
+            # Fall back to text-based parsing below.
+            pass
+
+    # Fallback: attempt to recover labels from textual content when the model
+    # returns a JSON array of reasoning strings or other unexpected structures.
+    try:
+        labels_only = _parse_from_text(
+            content if obj is None else _flatten_to_text(obj)
+        )
+
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Structured output could not be parsed for all heads: {exc}. Raw content: {content!r}"
+        ) from exc
+
+    return labels_only, None
+
+
+def refine_labels(
+    text: str,
+    labels: Dict[str, int],
+    extra_columns: Dict[str, object] | None = None,
+) -> Dict[str, int]:
+    """Apply simple rule-based refinements on top of the LLM labels.
+
+    This acts like a tiny weak-supervision engine that snaps labels to
+    consistent patterns based on the query text and known dataset metadata
+    such as `category` and `context`.
+    """
+
+    refined: Dict[str, int] = dict(labels)
+
+    category: str | None = None
+    context: str | None = None
+
+    if extra_columns:
+        raw_cat = extra_columns.get("category")
+
+        if raw_cat is not None:
+            category = str(raw_cat).strip().lower()
+
+        raw_ctx = extra_columns.get("context")
+
+        if raw_ctx is not None:
+            context = str(raw_ctx)
+
+    text_lower = text.lower()
+    ctx_len = len(context.split()) if context else 0
+    text_len = len(text.split()) if text else 0
+
+    # Category-based patterns (tuned for Dolly-style data).
+    if category in {"open_qa", "closed_qa", "general_qa"}:
+        if text_len <= 40 and ctx_len <= 80:
+            refined["simple"] = 1
+            refined["complex"] = 0
+
+    if category in {"information_extraction"}:
+        refined["complex"] = 1
+
+        if ctx_len > 50:
+            refined["needs_memory"] = 1
+
+    if category in {"summarization"}:
+        refined["complex"] = 1
+
+        if ctx_len > 50:
+            refined["needs_memory"] = 1
+
+    if category in {"classification"}:
+        refined["simple"] = 1
+        refined["complex"] = 0
+
+        if ctx_len < 100:
+            refined["needs_memory"] = 0
+
+    if category in {"brainstorming", "creative_writing"}:
+        refined["complex"] = 1
+
+    # Text-pattern rules for needs_tools.
+    if any(
+        kw in text_lower
+        for kw in (
+            "top 5",
+            "top five",
+            "top 10",
+            "top ten",
+            "top three",
+            "top 3",
+            "list of the best",
+            "best companies",
+            "current price",
+            "current rate",
+            "exchange rate",
+            "latest version",
+            "as of today",
+            "right now",
+        )
+    ):
+        refined["needs_tools"] = 1
+
+    # Text-pattern rules for code_like.
+    if any(
+        kw in text_lower
+        for kw in (
+            "python",
+            "javascript",
+            "typescript",
+            "rust",
+            "golang",
+            "java",
+            "c++",
+            "c#",
+            "stack trace",
+            "stacktrace",
+            "exception",
+            "traceback",
+            "segmentation fault",
+            "nullpointer",
+            "def ",
+            "class ",
+            "function(",
+            "async ",
+            "await ",
+        )
+    ):
+        refined["code_like"] = 1
+
+    # Safety / high_risk keywords.
+    if any(
+        kw in text_lower
+        for kw in (
+            "suicide",
+            "kill myself",
+            "kill myself",
+            "self-harm",
+            "self harm",
+            "overdose",
+            "cut myself",
+            "want to die",
+            "depressed",
+            "panic attack",
+            "emergency room",
+            "diagnose me",
+            "prescription",
+            "lawsuit",
+            "sue ",
+            "illegal",
+            "crime",
+            "terrorist",
+            "extremist",
+            "bomb",
+            "racial slur",
+            "racist joke",
+            "hate speech",
+        )
+    ):
+        refined["high_risk"] = 1
+
+    # Ensure at least one of simple/complex is 1.
+    simple_val = int(refined.get("simple", 0))
+    complex_val = int(refined.get("complex", 0))
+
+    if not (simple_val or complex_val):
+        if text_len <= 40:
+            refined["simple"] = 1
+
+        else:
+            refined["complex"] = 1
+
+    # Clamp all heads to 0/1 integers.
+    for head in P_LINEAR_HEADS:
+        refined[head] = 1 if int(refined.get(head, 0)) != 0 else 0
+
+    return refined
