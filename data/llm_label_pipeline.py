@@ -29,13 +29,17 @@ running the script.
 
 from __future__ import annotations
 import ast
+import argparse
 import json
 import re
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List
 import pandas as pd
-from pydantic import BaseModel
 from ollama import chat
+from pydantic import BaseModel
+from tqdm.auto import tqdm
+
 
 SYSTEM_PROMPT = """
     # TASK
@@ -685,3 +689,228 @@ def refine_labels(
         refined[head] = 1 if int(refined.get(head, 0)) != 0 else 0
 
     return refined
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Interactive LLM-based labeling pipeline that converts a local data "
+            "file into the canonical p-linear JSONL format using Ollama."
+        ),
+    )
+
+    parser.add_argument(
+        "--dataset-id",
+        type=str,
+        default=None,
+        help="Identifier for this dataset (e.g. HF ID); used only for logging.",
+    )
+
+    parser.add_argument(
+        "--input-path",
+        type=str,
+        default=None,
+        help="Path to a local CSV/TSV/JSON/JSONL/Parquet file to label.",
+    )
+
+    parser.add_argument(
+        "--columns",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated list of columns. The first column is treated as the "
+            "user query (text); subsequent columns are passed as context and "
+            "stored under metadata.source_columns. Example: question,context."
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="data/data.jsonl",
+        help=(
+            "Path to write the labeled JSONL file. Defaults to data/data.jsonl "
+            "relative to the project root."
+        ),
+    )
+
+    parser.add_argument(
+        "--max-rows",
+        type=int,
+        default=None,
+        help="Optional maximum number of rows to process (for testing).",
+    )
+
+    args = parser.parse_args()
+
+    dataset_id = _prompt_for_missing("Dataset ID: ", args.dataset_id)
+
+    input_path_str = _prompt_for_missing(
+        "Local data file path (CSV/JSON/Parquet): ", args.input_path
+    )
+
+    columns_str = _prompt_for_missing(
+        "Columns to use (comma-separated, e.g. question,context): ", args.columns
+    )
+
+    columns = [c.strip() for c in columns_str.split(",") if c.strip()]
+
+    if not columns:
+        raise SystemExit("No columns specified.")
+
+    input_path = Path(input_path_str)
+    is_remote = input_path_str.startswith(("hf://", "s3://", "http://", "https://"))
+
+    if not is_remote and not input_path.is_file():
+        raise SystemExit(f"Input file not found: {input_path}")
+
+    df = load_table(input_path_str, columns)
+
+    if args.max_rows is not None:
+        max_rows = min(args.max_rows, len(df))
+
+        if max_rows <= 0:
+            raise SystemExit("max-rows must be positive.")
+
+        df = df.sample(n=max_rows, replace=False).reset_index(drop=True)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    num_rows = len(df)
+
+    # Target fraction of time spent actively using the GPU (e.g., 0.8 = 80%).
+    target_duty_cycle = 0.8
+    # Number of rest blocks to spread over the dataset (up to 10).
+    num_rest_blocks = 10 if num_rows >= 10 else 1
+    rows_per_rest = max(1, num_rows // num_rest_blocks)
+
+    # Moving average of per-row LLM call duration (seconds).
+    avg_call_seconds = 0.0
+    timed_rows = 0
+
+    print(f"{COLOR_GREEN}Loaded {num_rows} rows from {input_path_str}.{COLOR_RESET}")
+    print(f"{COLOR_CYAN}Labeling with 'gemma3:12b' model...{COLOR_RESET}")
+
+    with output_path.open("a", encoding="utf-8") as out_f:
+        processed = 0
+        failed = 0
+
+        progress = tqdm(
+            df.iterrows(),
+            total=len(df),
+            desc=f"{COLOR_CYAN}Labeling{COLOR_RESET}",
+            unit="row",
+        )
+
+        for row_idx, row in progress:
+            text = build_text(row, columns)
+
+            if not text.strip():
+                failed += 1
+                progress.set_postfix(processed=processed, failed=failed)
+
+                continue
+
+            # Build a mapping of non-query columns to pass as context and store
+            # under metadata.
+            extra_columns: Dict[str, object] = {}
+
+            for col in columns[1:]:
+                if col in row and pd.notna(row[col]):
+                    extra_columns[col] = row[col]
+
+            start_ts = time.time()
+
+            try:
+                labels, metadata = call_ollama(
+                    text,
+                    extra_columns=extra_columns or None,
+                )
+
+                original_labels = dict(labels)
+                labels = refine_labels(text, labels, extra_columns or None)
+                processed += 1
+
+                # Update moving average of per-row latency.
+                row_duration = time.time() - start_ts
+                timed_rows += 1
+
+                if timed_rows == 1:
+                    avg_call_seconds = row_duration
+
+                else:
+                    avg_call_seconds = (
+                        avg_call_seconds * (timed_rows - 1) + row_duration
+                    ) / timed_rows
+
+            except Exception as exc:
+                failed += 1
+
+                print(
+                    f"{COLOR_YELLOW}[WARN]{COLOR_RESET} LLM call failed at row {row_idx}: {exc}"
+                )
+
+                progress.set_postfix(processed=processed, failed=failed)
+
+                continue
+
+            obj: Dict[str, object] = {"text": text, "labels": labels}
+
+            combined_meta: Dict[str, object] = {}
+
+            if metadata:
+                combined_meta.update(metadata)
+
+            if extra_columns:
+                combined_meta.setdefault("source_columns", {}).update(
+                    {k: str(v) for k, v in extra_columns.items()}
+                )
+
+            if dataset_id:
+                combined_meta.setdefault("dataset_id", dataset_id)
+
+            # Record rule-based refinement info to make debugging easier.
+            if processed > 0:
+                combined_meta.setdefault("rule_engine", {})
+                rule_info = combined_meta["rule_engine"]
+
+                if isinstance(rule_info, dict):
+                    rule_info.setdefault("applied", True)
+                    rule_info.setdefault("original_labels", original_labels)
+
+            if combined_meta:
+                obj["metadata"] = combined_meta
+
+            out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+            # GPU rest schedule: after each block of rows_per_rest processed rows,
+            # sleep long enough to maintain the target duty cycle.
+            if processed % rows_per_rest == 0 and avg_call_seconds > 0:
+                # For a block of rows_per_rest rows, active time is approximately:
+                #   T_active_block = rows_per_rest * avg_call_seconds
+                # To achieve a duty cycle D, required rest time per block is:
+                #   T_rest_block = T_active_block * (1 - D) / D
+                active_block = rows_per_rest * avg_call_seconds
+
+                rest_block = (
+                    active_block * (1.0 - target_duty_cycle) / target_duty_cycle
+                )
+
+                if rest_block > 0:
+                    print(
+                        f"{COLOR_YELLOW}Resting GPU for {rest_block:.1f}s after {processed} rows...{COLOR_RESET}"
+                    )
+
+                    time.sleep(rest_block)
+
+            progress.set_postfix(processed=processed, failed=failed)
+
+    print(
+        f"{COLOR_GREEN}Done.{COLOR_RESET} Wrote labeled data to {output_path}. "
+        f"Processed={processed}, failed={failed}."
+    )
+
+
+if __name__ == "__main__":
+    main()

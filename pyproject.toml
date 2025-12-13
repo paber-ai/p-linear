@@ -17,8 +17,8 @@ dependencies = [
     "python-dotenv (>=1.2.1,<2.0.0)",
     "tqdm (>=4.67.1,<5.0.0)",
     "pyarrow (>=22.0.0,<23.0.0)",
-    "fastparquet (>=2024.11.0,<2025.0.0)",
-    "huggingface-hub (>=1.2.2,<2.0.0)"
+    "huggingface-hub (>=1.2.2,<2.0.0)",
+    "datasets (>=4.4.1,<5.0.0)"
 ]
 
 
