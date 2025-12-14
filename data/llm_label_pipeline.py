@@ -781,9 +781,9 @@ def main() -> None:
 
     # Target fraction of time spent actively using the GPU (e.g., 0.8 = 80%).
     target_duty_cycle = 0.8
-    # Number of rest blocks to spread over the dataset (up to 10).
-    num_rest_blocks = 10 if num_rows >= 10 else 1
-    rows_per_rest = max(1, num_rows // num_rest_blocks)
+    # Rest the GPU only when progress crosses 10% increments up to 90%.
+    next_rest_percent = 10
+    processed_since_last_rest = 0
 
     # Moving average of per-row LLM call duration (seconds).
     avg_call_seconds = 0.0
@@ -831,6 +831,7 @@ def main() -> None:
                 original_labels = dict(labels)
                 labels = refine_labels(text, labels, extra_columns or None)
                 processed += 1
+                processed_since_last_rest += 1
 
                 # Update moving average of per-row latency.
                 row_duration = time.time() - start_ts
@@ -884,25 +885,25 @@ def main() -> None:
 
             out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-            # GPU rest schedule: after each block of rows_per_rest processed rows,
-            # sleep long enough to maintain the target duty cycle.
-            if processed % rows_per_rest == 0 and avg_call_seconds > 0:
-                # For a block of rows_per_rest rows, active time is approximately:
-                #   T_active_block = rows_per_rest * avg_call_seconds
-                # To achieve a duty cycle D, required rest time per block is:
-                #   T_rest_block = T_active_block * (1 - D) / D
-                active_block = rows_per_rest * avg_call_seconds
+            rows_completed = processed + failed
+            progress_percent = (rows_completed / num_rows) * 100.0 if num_rows else 0.0
 
-                rest_block = (
-                    active_block * (1.0 - target_duty_cycle) / target_duty_cycle
-                )
-
-                if rest_block > 0:
-                    print(
-                        f"{COLOR_YELLOW}Resting GPU for {rest_block:.1f}s after {processed} rows...{COLOR_RESET}"
+            while next_rest_percent <= 90 and progress_percent >= next_rest_percent:
+                if avg_call_seconds > 0 and processed_since_last_rest > 0:
+                    active_block = processed_since_last_rest * avg_call_seconds
+                    rest_block = (
+                        active_block * (1.0 - target_duty_cycle) / target_duty_cycle
                     )
 
-                    time.sleep(rest_block)
+                    if rest_block > 0:
+                        print(
+                            f"{COLOR_YELLOW}Progress {next_rest_percent}% – resting GPU for {rest_block:.1f}s...{COLOR_RESET}"
+                        )
+
+                        time.sleep(rest_block)
+
+                processed_since_last_rest = 0
+                next_rest_percent += 10
 
             progress.set_postfix(processed=processed, failed=failed)
 
@@ -910,6 +911,7 @@ def main() -> None:
         f"{COLOR_GREEN}Done.{COLOR_RESET} Wrote labeled data to {output_path}. "
         f"Processed={processed}, failed={failed}."
     )
+
 
 
 if __name__ == "__main__":
