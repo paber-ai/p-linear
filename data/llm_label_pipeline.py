@@ -779,15 +779,11 @@ def main() -> None:
 
     num_rows = len(df)
 
-    # Target fraction of time spent actively using the GPU (e.g., 0.8 = 80%).
-    target_duty_cycle = 0.8
-    # Rest the GPU only when progress crosses 10% increments up to 90%.
-    next_rest_percent = 10
-    processed_since_last_rest = 0
-
-    # Moving average of per-row LLM call duration (seconds).
-    avg_call_seconds = 0.0
-    timed_rows = 0
+    # Rest the GPU for 10 minutes at each 10% milestone (10%, 20%, ..., 90%).
+    rest_milestones = [i / 10 for i in range(1, 10)]
+    next_rest_index = 0
+    rest_minutes = 10
+    rest_duration_seconds = rest_minutes * 60
 
     print(f"{COLOR_GREEN}Loaded {num_rows} rows from {input_path_str}.{COLOR_RESET}")
     print(f"{COLOR_CYAN}Labeling with 'gemma3:12b' model...{COLOR_RESET}")
@@ -831,19 +827,6 @@ def main() -> None:
                 original_labels = dict(labels)
                 labels = refine_labels(text, labels, extra_columns or None)
                 processed += 1
-                processed_since_last_rest += 1
-
-                # Update moving average of per-row latency.
-                row_duration = time.time() - start_ts
-                timed_rows += 1
-
-                if timed_rows == 1:
-                    avg_call_seconds = row_duration
-
-                else:
-                    avg_call_seconds = (
-                        avg_call_seconds * (timed_rows - 1) + row_duration
-                    ) / timed_rows
 
             except Exception as exc:
                 failed += 1
@@ -885,25 +868,26 @@ def main() -> None:
 
             out_f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-            rows_completed = processed + failed
-            progress_percent = (rows_completed / num_rows) * 100.0 if num_rows else 0.0
+            # Rest the GPU for 10 minutes once per 10% milestone (10%..90%).
+            if (
+                num_rows > 0
+                and next_rest_index < len(rest_milestones)
+                and processed > 0
+            ):
+                current_progress = processed / num_rows
+                next_milestone = rest_milestones[next_rest_index]
 
-            while next_rest_percent <= 90 and progress_percent >= next_rest_percent:
-                if avg_call_seconds > 0 and processed_since_last_rest > 0:
-                    active_block = processed_since_last_rest * avg_call_seconds
-                    rest_block = (
-                        active_block * (1.0 - target_duty_cycle) / target_duty_cycle
+                if current_progress >= next_milestone:
+                    milestone_pct = int(next_milestone * 100)
+
+                    print(
+                        f"{COLOR_YELLOW}Resting GPU for {rest_minutes} minutes "
+                        f"({rest_duration_seconds}s) at {milestone_pct}% progress...{COLOR_RESET}"
                     )
 
-                    if rest_block > 0:
-                        print(
-                            f"{COLOR_YELLOW}Progress {next_rest_percent}% – resting GPU for {rest_block:.1f}s...{COLOR_RESET}"
-                        )
+                    time.sleep(rest_duration_seconds)
 
-                        time.sleep(rest_block)
-
-                processed_since_last_rest = 0
-                next_rest_percent += 10
+                    next_rest_index += 1
 
             progress.set_postfix(processed=processed, failed=failed)
 
@@ -911,7 +895,6 @@ def main() -> None:
         f"{COLOR_GREEN}Done.{COLOR_RESET} Wrote labeled data to {output_path}. "
         f"Processed={processed}, failed={failed}."
     )
-
 
 
 if __name__ == "__main__":
