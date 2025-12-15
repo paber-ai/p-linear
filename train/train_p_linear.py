@@ -9,12 +9,14 @@ implemented once the concrete data sources are finalized.
 """
 
 from __future__ import annotations
-from typing import List, Mapping, Sequence, Dict
+import json
+from pathlib import Path
+from typing import List, Mapping, Sequence, Dict, Iterable
 import numpy as np
 from scipy.sparse import csr_matrix
 from dataclasses import dataclass
 from sklearn.feature_extraction.text import HashingVectorizer
-
+from sklearn.linear_model import SGDClassifier
 
 P_LINEAR_HEADS: List[str] = [
     "simple",
@@ -126,3 +128,129 @@ def build_vectorizer(config: HashingConfig | None = None) -> HashingVectorizer:
         alternate_sign=False,
         decode_error="ignore",
     )
+
+
+def build_label_models(heads: Iterable[str] | None = None) -> Dict[str, SGDClassifier]:
+    """Create an SGDClassifier per p-linear head.
+
+    Each head is treated as an independent binary classifier over the same
+    hashed feature space. We use logistic loss so that downstream consumers
+    can interpret outputs as probabilities after applying a sigmoid.
+    """
+
+    if heads is None:
+        heads = P_LINEAR_HEADS
+
+    models: Dict[str, SGDClassifier] = {}
+
+    for name in heads:
+        models[name] = SGDClassifier(
+            loss="log_loss",
+            penalty="l2",
+            alpha=1e-4,
+            learning_rate="optimal",
+            max_iter=1000,
+            tol=1e-3,
+            shuffle=True,
+            class_weight="balanced",
+            random_state=42,
+        )
+
+    return models
+
+
+def export_weights(
+    models: Mapping[str, SGDClassifier],
+    config: HashingConfig,
+    output_path: str | Path,
+) -> None:
+    """Export model weights and hashing config to JSON.
+
+    The resulting file is intended to be ingested by a small generator that
+    produces Rust constants used by the WASM inference engine.
+
+    Parameters
+    ----------
+    models:
+        Mapping from head name to trained SGDClassifier. Each classifier is
+        expected to be binary (one set of coefficients).
+    config:
+        Hashing configuration used to construct the feature extractor.
+    output_path:
+        File path to write the JSON payload to.
+    """
+
+    payload: Dict[str, object] = {
+        "hashing": {
+            "n_features": config.n_features,
+            "ngram_min": config.ngram_min,
+            "ngram_max": config.ngram_max,
+            "analyzer": config.analyzer,
+        },
+        "heads": {},
+    }
+
+    heads: Dict[str, object] = {}
+
+    for name, model in models.items():
+        if not hasattr(model, "coef_") or not hasattr(model, "intercept_"):
+            raise ValueError(f"Model for head '{name}' is not trained (missing coef_).")
+
+        coef = model.coef_
+        intercept = model.intercept_
+
+        if coef.shape[0] != 1:
+            raise ValueError(
+                f"Head '{name}' expected binary classifier (1 row), got {coef.shape[0]} rows."
+            )
+
+        heads[name] = {
+            "weights": coef[0].tolist(),
+            "bias": float(intercept[0]),
+        }
+
+    payload["heads"] = heads
+
+    output_path = Path(output_path)
+    output_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def train_on_examples(
+    examples: Sequence[TrainingExample],
+    config: HashingConfig | None = None,
+) -> tuple[HashingConfig, Dict[str, SGDClassifier]]:
+    """Train p-linear heads on an in-memory list of labeled examples.
+
+    This helper is dataset-agnostic: it assumes that the caller has already
+    constructed a list of TrainingExample instances from their preferred
+    sources (Hugging Face datasets, logs, etc.). It fits one SGDClassifier per
+    head over a shared hashed feature space.
+
+    Heads that only see a single class in the provided labels are currently
+    skipped to avoid fitting degenerate models; callers may choose to provide
+    more diverse data for those heads.
+    """
+
+    if not examples:
+        raise ValueError("No training examples provided to train_on_examples().")
+
+    if config is None:
+        config = HashingConfig()
+
+    models = build_label_models()
+
+    texts = [ex.text for ex in examples]
+    X = build_feature_matrix(texts, config)
+
+    for head, model in models.items():
+        y = [int(ex.labels.get(head, 0)) for ex in examples]
+
+        # Skip heads where all labels are identical; caller can decide how to
+        # handle these cases (e.g., collect more data).
+        if len(set(y)) < 2:
+            continue
+
+        model.fit(X, y)
+
+    return config, models
+
