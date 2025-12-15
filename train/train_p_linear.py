@@ -19,6 +19,7 @@ from typing import List, Mapping, Sequence, Dict, Iterable
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import SGDClassifier
 
+
 P_LINEAR_HEADS: List[str] = [
     "simple",
     "complex",
@@ -32,7 +33,6 @@ P_LINEAR_HEADS: List[str] = [
 _FNV_OFFSET = 0xCBF29CE484222325
 _FNV_PRIME = 0x100000001B3
 _U64_MASK = 0xFFFFFFFFFFFFFFFF
-
 
 
 @dataclass
