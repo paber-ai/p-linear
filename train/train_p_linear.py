@@ -9,12 +9,13 @@ implemented once the concrete data sources are finalized.
 """
 
 from __future__ import annotations
+import argparse
 import json
-from pathlib import Path
-from typing import List, Mapping, Sequence, Dict, Iterable
 import numpy as np
+from pathlib import Path
 from scipy.sparse import csr_matrix
 from dataclasses import dataclass
+from typing import List, Mapping, Sequence, Dict, Iterable
 from sklearn.feature_extraction.text import HashingVectorizer
 from sklearn.linear_model import SGDClassifier
 
@@ -254,3 +255,110 @@ def train_on_examples(
 
     return config, models
 
+
+def main() -> None:
+    """Command-line entry point for p-linear training.
+
+    This CLI expects a JSONL file where each line is a JSON object of the form:
+
+    {"text": "...", "labels": {"simple": 1, "complex": 0, ...}}
+
+    Only the heads defined in P_LINEAR_HEADS are used. Missing heads in the
+    labels mapping default to 0.
+    """
+
+    parser = argparse.ArgumentParser(description="Train the p-linear model.")
+    parser.add_argument(
+        "--train-jsonl",
+        type=str,
+        required=True,
+        help=(
+            "Path to a JSONL file with one training example per line. "
+            "Each line must contain at least a 'text' field and an optional "
+            "'labels' mapping."
+        ),
+    )
+
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to write the exported weights JSON for Rust/WASM.",
+    )
+
+    parser.add_argument(
+        "--n-features",
+        type=int,
+        default=2**15,
+        help="Number of hashing buckets (features) to use.",
+    )
+
+    parser.add_argument(
+        "--ngram-min",
+        type=int,
+        default=2,
+        help="Minimum character n-gram size.",
+    )
+
+    parser.add_argument(
+        "--ngram-max",
+        type=int,
+        default=3,
+        help="Maximum character n-gram size.",
+    )
+
+    args = parser.parse_args()
+
+    config = HashingConfig(
+        n_features=args.n_features,
+        ngram_min=args.ngram_min,
+        ngram_max=args.ngram_max,
+    )
+
+    train_path = Path(args.train_jsonl)
+
+    if not train_path.is_file():
+        raise SystemExit(f"Training JSONL file not found: {train_path}")
+
+    examples: List[TrainingExample] = []
+
+    with train_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+
+            if not line:
+                continue
+
+            obj = json.loads(line)
+
+            text = obj.get("text")
+
+            if not isinstance(text, str):
+                raise ValueError("Each JSONL line must contain a 'text' string field.")
+
+            raw_labels = obj.get("labels") or {}
+
+            if not isinstance(raw_labels, Mapping):
+                raise ValueError("'labels' must be a mapping from head name to 0/1.")
+
+            # Normalize labels to int flags.
+            labels: Dict[str, int] = {}
+
+            for head in P_LINEAR_HEADS:
+                value = raw_labels.get(head, 0)
+                labels[head] = int(value)
+
+            examples.append(TrainingExample(text=text, labels=labels))
+
+    if not examples:
+        raise SystemExit("No valid training examples were loaded from JSONL.")
+
+    config, models = train_on_examples(examples, config)
+    export_weights(models, config, args.output)
+
+    print(f"Trained p-linear on {len(examples)} examples.")
+    print(f"Exported weights to {args.output}.")
+
+
+if __name__ == "__main__":
+    main()
