@@ -14,6 +14,8 @@ The generated Rust module is intended to replace the placeholder
 `model/src/weights.rs` that ships with the repository.
 """
 
+from __future__ import annotations
+import argparse
 import json
 from pathlib import Path
 from typing import Mapping
@@ -123,3 +125,37 @@ def generate_weights_rs(weights_json: Path, output_rs: Path) -> None:
     lines.append("};\n")
 
     output_rs.write_text("".join(lines), encoding="utf-8")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate Rust weights.rs from p-linear exported weights JSON.",
+    )
+
+    parser.add_argument(
+        "--weights-json",
+        type=str,
+        required=True,
+        help="Path to the JSON file produced by train_p_linear.export_weights().",
+    )
+
+    parser.add_argument(
+        "--output",
+        type=str,
+        required=True,
+        help="Path to write the generated Rust weights module (weights.rs).",
+    )
+
+    args = parser.parse_args()
+
+    weights_json = Path(args.weights_json)
+
+    if not weights_json.is_file():
+        raise SystemExit(f"Weights JSON not found: {weights_json}")
+
+    output_rs = Path(args.output)
+    generate_weights_rs(weights_json, output_rs)
+
+
+if __name__ == "__main__":
+    main()
