@@ -1,6 +1,6 @@
 mod weights;
 use wasm_bindgen::prelude::*;
-use crate::weights::{HeadWeights, NGRAM_MIN, NGRAM_MAX, N_FEATURES};
+use crate::weights::{HeadWeights, HEADS, NGRAM_MAX, NGRAM_MIN, N_FEATURES};
 
 /// Output of the p-linear gating model.
 ///
@@ -105,5 +105,71 @@ impl PLinearResult {
     #[wasm_bindgen(getter)]
     pub fn p_code_like(&self) -> f32 {
         self.p_code_like
+    }
+}
+
+/// Analyze a query and return heuristic p-linear routing probabilities.
+///
+/// This function currently uses a very lightweight heuristic based on query
+/// length and a few pattern checks (code-like markers). It is intended to be
+/// swapped out with a real linear model whose weights are generated from the
+/// Python training pipeline.
+#[wasm_bindgen]
+pub fn analyze_query(text: &str) -> PLinearResult {
+    let len = text.chars().count() as f32;
+    let normalized_len = (len / 200.0).min(1.0);
+
+    // Naive code-like detection.
+    let lower = text.to_lowercase();
+    let has_code_markers = lower.contains("```")
+        || lower.contains("fn ")
+        || lower.contains("class ")
+        || lower.contains("def ")
+        || lower.contains("public static void")
+        || lower.contains("#include");
+
+    let mut p_code_like = if has_code_markers { 0.9 } else { 0.1 };
+
+    // Simple vs complex: longer queries are treated as more complex.
+    let mut p_complex = normalized_len;
+    let mut p_simple = (1.0 - p_complex * 0.7).clamp(0.0, 1.0);
+
+    // Placeholder estimates for tools, memory, and risk.
+    let mut p_needs_tools = 0.2;
+    let mut p_needs_memory = (normalized_len * 0.5).clamp(0.0, 1.0);
+    let mut p_high_risk = 0.1;
+
+    // If learned weights are available, override heuristic estimates per head.
+    if let Some(p) = linear_score_for_head(text, HEADS.simple) {
+        p_simple = p;
+    }
+
+    if let Some(p) = linear_score_for_head(text, HEADS.complex) {
+        p_complex = p;
+    }
+
+    if let Some(p) = linear_score_for_head(text, HEADS.needs_tools) {
+        p_needs_tools = p;
+    }
+
+    if let Some(p) = linear_score_for_head(text, HEADS.needs_memory) {
+        p_needs_memory = p;
+    }
+
+    if let Some(p) = linear_score_for_head(text, HEADS.high_risk) {
+        p_high_risk = p;
+    }
+
+    if let Some(p) = linear_score_for_head(text, HEADS.code_like) {
+        p_code_like = p;
+    }
+
+    PLinearResult {
+        p_simple,
+        p_complex,
+        p_needs_tools,
+        p_needs_memory,
+        p_high_risk,
+        p_code_like,
     }
 }
