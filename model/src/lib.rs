@@ -74,3 +74,36 @@ fn linear_score_for_head(text: &str, head: &HeadWeights) -> Option<f32> {
 
     Some(sigmoid(sum))
 }
+
+#[wasm_bindgen]
+impl PLinearResult {
+    #[wasm_bindgen(getter)]
+    pub fn p_simple(&self) -> f32 {
+        self.p_simple
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn p_complex(&self) -> f32 {
+        self.p_complex
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn p_needs_tools(&self) -> f32 {
+        self.p_needs_tools
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn p_needs_memory(&self) -> f32 {
+        self.p_needs_memory
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn p_high_risk(&self) -> f32 {
+        self.p_high_risk
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn p_code_like(&self) -> f32 {
+        self.p_code_like
+    }
+}
