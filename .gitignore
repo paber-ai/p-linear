@@ -229,3 +229,5 @@ target
 # Data
 data.jsonl
 weights.rs
+./artifacts/p_linear_weights.json
+./artifacts/p_linear_thresholds.json
