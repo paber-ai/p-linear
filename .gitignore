@@ -228,3 +228,4 @@ target
 
 # Data
 data.jsonl
+weights.rs
