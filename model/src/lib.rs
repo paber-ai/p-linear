@@ -2,6 +2,13 @@ mod weights;
 use wasm_bindgen::prelude::*;
 use crate::weights::{HeadWeights, HEADS, NGRAM_MAX, NGRAM_MIN, N_FEATURES};
 
+const THRESH_SIMPLE: f32 = 0.3488749563694;
+const THRESH_COMPLEX: f32 = 0.1897398829460144;
+const THRESH_NEEDS_TOOLS: f32 = 0.2276897132396698;
+const THRESH_NEEDS_MEMORY: f32 = 0.832271933555603;
+const THRESH_HIGH_RISK: f32 = 1.0;
+const THRESH_CODE_LIKE: f32 = 0.9067980051040649;
+
 /// Output of the p-linear gating model.
 ///
 /// This is a stub implementation that currently uses simple heuristics over
@@ -15,6 +22,12 @@ pub struct PLinearResult {
     p_needs_memory: f32,
     p_high_risk: f32,
     p_code_like: f32,
+    d_simple: bool,
+    d_complex: bool,
+    d_needs_tools: bool,
+    d_needs_memory: bool,
+    d_high_risk: bool,
+    d_code_like: bool,
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -106,6 +119,36 @@ impl PLinearResult {
     pub fn p_code_like(&self) -> f32 {
         self.p_code_like
     }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_simple(&self) -> bool {
+        self.d_simple
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_complex(&self) -> bool {
+        self.d_complex
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_needs_tools(&self) -> bool {
+        self.d_needs_tools
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_needs_memory(&self) -> bool {
+        self.d_needs_memory
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_high_risk(&self) -> bool {
+        self.d_high_risk
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn d_code_like(&self) -> bool {
+        self.d_code_like
+    }
 }
 
 /// Analyze a query and return heuristic p-linear routing probabilities.
@@ -164,6 +207,13 @@ pub fn analyze_query(text: &str) -> PLinearResult {
         p_code_like = p;
     }
 
+    let d_simple = p_simple >= THRESH_SIMPLE;
+    let d_complex = p_complex >= THRESH_COMPLEX;
+    let d_needs_tools = p_needs_tools >= THRESH_NEEDS_TOOLS;
+    let d_needs_memory = p_needs_memory >= THRESH_NEEDS_MEMORY;
+    let d_high_risk = p_high_risk >= THRESH_HIGH_RISK;
+    let d_code_like = p_code_like >= THRESH_CODE_LIKE;
+
     PLinearResult {
         p_simple,
         p_complex,
@@ -171,5 +221,11 @@ pub fn analyze_query(text: &str) -> PLinearResult {
         p_needs_memory,
         p_high_risk,
         p_code_like,
+        d_simple,
+        d_complex,
+        d_needs_tools,
+        d_needs_memory,
+        d_high_risk,
+        d_code_like,
     }
 }
