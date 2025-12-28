@@ -1,0 +1,18 @@
+{
+  "name": "@paber/p-linear",
+  "version": "0.1.1",
+  "description": "p-linear WASM kernel",
+  "license": "MIT",
+  "files": [
+    "pkg"
+  ],
+  "main": "pkg/p_linear_model.js",
+  "types": "pkg/p_linear_model.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "wasm-pack build . --target nodejs --out-dir ./pkg --out-name p_linear_model",
+    "prepublishOnly": "bun run build"
+  }
+}
